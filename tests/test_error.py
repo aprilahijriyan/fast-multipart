@@ -49,7 +49,7 @@ def test_invalid_form_data():
     with pytest.raises(ValueError, match="Invalid multipart form-data"):
         feed(payload)
 
-def test_invalid_form_field():
+def test_missing_field_name():
     boundary = "--utf8boundary"
     lines = [
         f"--{boundary}".encode(),
