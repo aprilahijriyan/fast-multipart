@@ -1,6 +1,7 @@
 use memchr::memmem;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes};
+use pyo3::types::PyBytes;
 use std::collections::HashMap;
 
 #[pyclass]
@@ -37,7 +38,7 @@ fn parse_headers(data: &[u8]) -> PyResult<FieldPart> {
     let header_str = match std::str::from_utf8(data) {
         Ok(s) => s,
         Err(e) => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            return Err(PyValueError::new_err(format!(
                 "Invalid UTF-8 in headers: {}",
                 e
             )))
@@ -52,32 +53,36 @@ fn parse_headers(data: &[u8]) -> PyResult<FieldPart> {
 
     let disposition = match headers.get("content-disposition") {
         Some(d) => d,
-        None => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Missing Content-Disposition header",
-            ))
-        }
+        None => return Err(PyValueError::new_err("Missing Content-Disposition header")),
     };
 
     let mut name = None;
     let mut filename = None;
+    let mut is_form_data = None;
 
     for part in disposition.split(';') {
         let part = part.trim();
-        if let Some(val) = part.strip_prefix("name=\"") {
+        if part == "form-data" {
+            is_form_data = Some(true);
+        } else if let Some(val) = part.strip_prefix("name=\"") {
             name = Some(val.trim_end_matches('\"').to_string());
         } else if let Some(val) = part.strip_prefix("filename=\"") {
             filename = Some(val.trim_end_matches('\"').to_string());
         }
     }
+    if is_form_data.is_none() {
+        return Err(PyValueError::new_err("Invalid multipart form-data"));
+    }
 
     let name = match name {
-        Some(n) => n,
-        None => {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "Missing name in Content-Disposition",
-            ))
+        Some(n) => {
+            let field_name = n.trim();
+            if field_name.len() < 1 {
+                return Err(PyValueError::new_err("Missing name in Content-Disposition"));
+            }
+            field_name.to_string()
         }
+        None => return Err(PyValueError::new_err("Missing name in Content-Disposition")),
     };
 
     Ok(FieldPart {
@@ -110,7 +115,7 @@ impl MultipartParser {
         on_field: &Bound<'_, PyAny>,
         on_field_data: &Bound<'_, PyAny>,
         on_field_end: &Bound<'_, PyAny>,
-        buffer_cap: Option<usize>
+        buffer_cap: Option<usize>,
     ) -> Self {
         let full_boundary = [MULTIPART_PREFIX, boundary.as_bytes()].concat();
         let part_boundary = [CRLF, &full_boundary].concat();
@@ -129,13 +134,9 @@ impl MultipartParser {
         }
     }
 
-    pub fn feed(
-        &mut self,
-        py: Python,
-        data: &[u8],
-    ) -> PyResult<()> {
+    pub fn feed(&mut self, py: Python, data: &[u8]) -> PyResult<()> {
         if self.state == ParserState::Done {
-            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            return Err(PyRuntimeError::new_err(
                 "Cannot receive new data, parser is already closed.",
             ));
         }
@@ -181,7 +182,8 @@ impl MultipartParser {
                             // It's the FINAL boundary.
                             if pos > 0 {
                                 let data_slice = &unprocessed[..pos];
-                                self.on_field_data.call1(py, (PyBytes::new(py, data_slice),))?;
+                                self.on_field_data
+                                    .call1(py, (PyBytes::new(py, data_slice),))?;
                             }
                             self.on_field_end.call0(py)?;
                             self.cursor += pos + self.final_boundary.len();
@@ -190,7 +192,8 @@ impl MultipartParser {
                             // It's a regular PART boundary.
                             if pos > 0 {
                                 let data_slice = &unprocessed[..pos];
-                                self.on_field_data.call1(py, (PyBytes::new(py, data_slice),))?;
+                                self.on_field_data
+                                    .call1(py, (PyBytes::new(py, data_slice),))?;
                             }
                             self.on_field_end.call0(py)?;
                             self.cursor += pos + self.part_boundary.len();
@@ -208,7 +211,8 @@ impl MultipartParser {
 
                         if chunk_len > 0 {
                             let data_slice = &unprocessed[..chunk_len];
-                            self.on_field_data.call1(py, (PyBytes::new(py, data_slice),))?;
+                            self.on_field_data
+                                .call1(py, (PyBytes::new(py, data_slice),))?;
                             self.cursor += chunk_len;
                         }
                         // We need more data to find a boundary, so we break the loop.
